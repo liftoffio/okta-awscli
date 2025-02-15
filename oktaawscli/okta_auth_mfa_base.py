@@ -66,13 +66,18 @@ class OktaAuthMfaBase():
         if WEBAUTHN_ALLOWED:
             supported_factor_types.append("webauthn")
 
+        self.logger.debug("Available factors: %s", factors_list)
+        self.logger.debug("Supported factor types: %s", supported_factor_types)
+
         supported_factors = []
         for factor in factors_list:
             if factor['factorType'] in supported_factor_types:
                 supported_factors.append(factor)
             else:
                 self.logger.error("Unsupported factorType: %s" %
-                                 (factor['factorType'],))
+                    factor['factorType'])
+                if factor['factorType'] == 'webauthn' and not WEBAUTHN_ALLOWED:
+                    self.logger.info("WebAuthn support requires fido2>=1.1.1 and ctap-keyring-device")
 
         supported_factors = sorted(supported_factors,
                                    key=lambda factor: (
@@ -225,22 +230,21 @@ class OktaAuthMfaBase():
                         print("User Verification required.")
                         return True
 
-                user_verification = UserVerificationRequirement.DISCOURAGED
+                # First try to find USB devices (like Yubikey)
                 devices = list(CtapHidDevice.list_devices())
-                # Support for 'Touch ID' on macOS
-                if sys.platform == "darwin":
+                
+                # If we're on macOS and no USB devices found, try Touch ID
+                if not devices and sys.platform == "darwin":
                     from ctap_keyring_device.ctap_keyring_device import CtapKeyringDevice
-                    from ctap_keyring_device.ctap_strucs import CtapOptions
-                    # devices = devices + CtapKeyringDevice.list_devices()  # this is too noisy!
-                    # Dirty hack to detect that 'Touch ID' is being requested
-                    print("[DEBUG]", factor)
-                    if (factor["profile"]["authenticatorName"] is None) and ("yubi" not in ("%s" % factor["profile"]["authenticatorName"]).lower()):
-                        print("[DEBUG] - Invoking CtapKeyringDevice.list_devices() stuff...")
-                        devices = CtapKeyringDevice.list_devices()  # only try the 'Touch ID'
-                        print("[DEBUG]", devices)
+                    authenticator_name = factor.get("profile", {}).get("authenticatorName", "").lower()
+                    if not authenticator_name or "touch id" in authenticator_name:
+                        print("No USB security key found, using Touch ID for authentication...")
+                        devices = CtapKeyringDevice.list_devices()
+
                 if len(devices) == 0:
-                    self.logger.warning("No U2F device found. Exiting...")
+                    self.logger.warning("No WebAuthn device found. Please ensure your security key is inserted or Touch ID is available.")
                     exit(1)
+
                 challenge = v(resp_json, '_embedded.factor._embedded.challenge.challenge')
                 challenge_b = websafe_decode(challenge)
                 credentialId = websafe_decode(v(resp_json,'_embedded.factor.profile.credentialId'))
@@ -249,32 +253,25 @@ class OktaAuthMfaBase():
                 while not result:
                     for dev in devices:
                         if isinstance(dev, CtapHidDevice):
-                            user_verification = UserVerificationRequirement.REQUIRED
-                        else:
+                            user_interaction_msg = 'Please touch your security key...'
                             user_verification = UserVerificationRequirement.DISCOURAGED
-                        client = Fido2Client(dev, self.https_base_url)
-                        user_interaction_msg = (
-                            '!!! Touch the selected MFA device on your macOS laptop... !!!'
-                            if sys.platform == "darwin"
-                            else '!!! Touch the flashing U2F device to authenticate... !!!'
-                        )
+                        else:
+                            user_interaction_msg = 'Please verify with Touch ID...'
+                            user_verification = UserVerificationRequirement.REQUIRED
+
                         client = Fido2Client(
                             device=dev,
                             origin=self.https_base_url,
                             user_interaction=CliInteraction(user_interaction_msg),
                         )
-                        user_verification = (
-                            UserVerificationRequirement.REQUIRED
-                            if client.info.options.get('clientPin', False)
-                            else UserVerificationRequirement.DISCOURAGED
-                        )
+
                         request = PublicKeyCredentialRequestOptions(
                             challenge=challenge_b,
                             timeout=100000,
                             rp_id=self.base_url,
                             allow_credentials=[
                                 PublicKeyCredentialDescriptor(
-                                    type=PublicKeyCredentialType.PUBLIC_KEY ,
+                                    type=PublicKeyCredentialType.PUBLIC_KEY,
                                     id=credentialId
                                 )
                             ],
@@ -303,12 +300,12 @@ class OktaAuthMfaBase():
                             elif resp_json['factorResult'] == 'REJECTED':
                                 self.logger.warning("Verification was rejected")
                                 exit(1)
-                            # break
                         except Exception:
                             traceback.print_exc(file=sys.stderr)
                             result = None
+                            continue
                     if not result:
-                        return None
+                        time.sleep(0.1)  # Small delay before retrying
 
         elif resp.status_code != 200:
             self.logger.error(resp_json['errorSummary'])

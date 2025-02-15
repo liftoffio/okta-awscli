@@ -44,9 +44,10 @@ setup(
         'beautifulsoup4',
         'boto3',
         'ConfigParser',
-        'validators'],
+        'validators',
+        'fido2>=1.1.1',
+        'ctap-keyring-device @ git+https://github.com/liftoffio/ctap-keyring-device.git'],
     extras_require={
         'U2F': ['python-u2flib-host'],
-        'FIDO2': ['fido2>=1.1.1'],
     },
 )
